@@ -3,3 +3,7 @@ widget.json
 usage_widget.log
 *.tmp
 preview.png
+build/
+dist/
+*.spec
+icon.ico

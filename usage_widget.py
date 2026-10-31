@@ -12,6 +12,7 @@ import threading
 import time
 import tkinter as tk
 import urllib.request
+import winreg
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
@@ -19,9 +20,13 @@ from pathlib import Path
 import pystray
 from PIL import Image, ImageDraw
 
+APP_NAME = "UsageWidget"
 HOME = Path.home()
-HERE = Path(__file__).resolve().parent
-STATE_FILE = HERE / "widget.json"
+DATA_DIR = Path(os.environ.get("APPDATA", HOME)) / APP_NAME
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+STATE_FILE = DATA_DIR / "widget.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REFRESH_SECONDS = 300
 REDRAW_MS = 30_000
 PEEK_POLL_MS = 150
@@ -30,7 +35,8 @@ SESSION_SECONDS = 5 * 3600
 WEEK_SECONDS = 7 * 86400
 
 # Favourite first: the suggestion goes to the first usable sub in this order.
-ORDER = ["Claude", "Codex", "AG Claude/GPT", "AG Gemini"]
+# ORDER and LAUNCH are defaults; settings.json overrides them (see load_settings).
+ORDER =["Claude", "Codex", "AG Claude/GPT", "AG Gemini"]
 MIN_SESSION_LEFT = 20      # % of 5h window; below this a sub is not worth suggesting
 MAX_BEHIND_PACE = -10      # weekly pace delta; further behind than this and the sub is skipped
 EXPIRY_OVERRIDE_LEFT = 50  # % of 5h left that jumps the queue when ...
@@ -63,7 +69,7 @@ FONT_ICON = ("Segoe MDL2 Assets", 8)
 BELL = ""  # Segoe MDL2 "Ringer"
 BAR_W, BAR_H, TIME_H = 150, 14, 3
 
-logging.basicConfig(filename=HERE / "usage_widget.log", level=logging.WARNING,
+logging.basicConfig(filename=DATA_DIR / "usage_widget.log", level=logging.WARNING,
                     format="%(asctime)s %(message)s")
 
 
@@ -159,7 +165,60 @@ def fetch_antigravity():
     return subs
 
 
-PROVIDERS = {"Claude": fetch_claude, "Codex": fetch_codex, "Antigravity": fetch_antigravity}
+ALL_PROVIDERS = {  # name -> (fetcher, is it installed?)
+    "Claude": (fetch_claude, CLAUDE_CREDS.exists),
+    "Codex": (fetch_codex, CODEX_AUTH.exists),
+    "Antigravity": (fetch_antigravity, lambda: shutil.which("agy") is not None),
+}
+
+
+def installed_providers():
+    return {name: fetch for name, (fetch, installed) in ALL_PROVIDERS.items() if installed()}
+
+
+# ---------- settings and startup ----------
+
+def load_settings():
+    """User-editable favourite order and launch targets; written with defaults on first run."""
+    global ORDER, LAUNCH
+    if not SETTINGS_FILE.exists():
+        write_json(SETTINGS_FILE, {"order": ORDER, "launch": LAUNCH})
+    try:
+        settings = json.loads(SETTINGS_FILE.read_text())
+        ORDER, LAUNCH = settings.get("order", ORDER), settings.get("launch", LAUNCH)
+    except (OSError, ValueError) as exc:  # keep the previous settings until the file is fixed
+        logging.warning("settings.json: %s", exc)
+
+
+def launch_command():
+    if getattr(sys, "frozen", False):  # PyInstaller exe
+        return f'"{sys.executable}"'
+    return f'"{Path(sys.executable).with_name("pythonw.exe")}" "{Path(__file__).resolve()}"'
+
+
+def starts_with_windows():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            winreg.QueryValueEx(key, APP_NAME)
+            return True
+    except OSError:
+        return False
+
+
+def set_start_with_windows(on):
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        if on:
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, launch_command())
+        else:
+            winreg.DeleteValue(key, APP_NAME)
+
+
+def already_running():
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # The handle is deliberately never closed: it marks this instance until the process exits.
+    kernel32.CreateMutexW(None, False, f"{APP_NAME}SingleInstance")
+    ERROR_ALREADY_EXISTS = 183
+    return ctypes.get_last_error() == ERROR_ALREADY_EXISTS
 
 
 # ---------- deciding ----------
@@ -326,8 +385,10 @@ class Widget:
         self.body.pack()
         self.tooltip = Tooltip(self.root)
 
+        load_settings()
+        self.providers = installed_providers()
         # provider -> {"subs": [...], "ok_at": ts, "error": str|None}
-        self.data = {name: {"subs": [], "ok_at": None, "error": None} for name in PROVIDERS}
+        self.data = {name: {"subs": [], "ok_at": None, "error": None} for name in self.providers}
         self.events = queue.Queue()
         self.popped = False
         self.peek_anchor = None  # cursor position while hover-peeking from the tray
@@ -343,6 +404,8 @@ class Widget:
         self.tray = TrayIcon("usage_widget", self.tray_image(False), "AI usage", menu=pystray.Menu(
             pystray.MenuItem("Show", lambda: self.events.put(("popup",)), default=True, visible=False),
             pystray.MenuItem("Refresh", lambda: self.events.put(("refresh",))),
+            pystray.MenuItem("Start with Windows", self.toggle_autostart, checked=lambda item: starts_with_windows()),
+            pystray.MenuItem("Edit settings", lambda: subprocess.Popen(["notepad.exe", str(SETTINGS_FILE)])),
             pystray.MenuItem("Quit", lambda: self.events.put(("quit",)))),
             on_hover=lambda: self.events.put(("peek",)))
         self.tray.run_detached()
@@ -421,8 +484,14 @@ class Widget:
             self.to_bottom()
 
     # --- refresh ---
+    @staticmethod
+    def toggle_autostart(icon, item):
+        set_start_with_windows(not starts_with_windows())
+        icon.update_menu()
+
     def refresh(self):
-        for name, fetch in PROVIDERS.items():
+        load_settings()  # pick up edits to settings.json without a restart
+        for name, fetch in self.providers.items():
             threading.Thread(target=self.fetch_one, args=(name, fetch), daemon=True).start()
 
     def fetch_one(self, name, fetch):
@@ -479,6 +548,8 @@ class Widget:
                 footnotes.append((f"{provider}: {'failed' if stale else 'loading...'}", stale))
             elif stale:
                 footnotes.append((f"{provider}: failed, showing {ago(entry['ok_at'])}", stale))
+        if not self.providers:
+            footnotes.append(("No supported tools found. Sign in to Claude Code, Codex or Antigravity.", False))
         rows.sort(key=lambda r: rank(r[0]["name"]))
         pick = suggest([s for s, stale in rows if not stale], now)
 
@@ -644,7 +715,10 @@ if __name__ == "__main__":
     if "--check" in sys.argv:
         self_check()
         now, subs = time.time(), []
-        for name, fetch in PROVIDERS.items():
+        load_settings()
+        providers = installed_providers()
+        print("installed:", ", ".join(providers) or "none")
+        for name, fetch in providers.items():
             try:
                 subs += fetch()
             except Exception as exc:
@@ -653,5 +727,7 @@ if __name__ == "__main__":
             h = "    -" if s["h"] is None else f"{s['h']:5.1f}%"
             print(f"{s['name']:14} 5h {h} {countdown(s['h_reset']):>20}  pace {pace_delta(s, now):+d}%")
         print("suggest:", suggest([s for s in subs if s["h"] is not None], now))
-    else:
+    elif not already_running():
+        if not STATE_FILE.exists():  # first run: start with Windows by default, untick in the tray menu
+            set_start_with_windows(True)
         Widget().run()
