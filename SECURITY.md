@@ -7,6 +7,7 @@ Audit of `usage_widget.py`, the build script and git history, 2026-10-31.
 - **Reads** Claude Code (`~/.claude/.credentials.json`) and Codex (`~/.codex/auth.json`) OAuth tokens, and sends them only to `api.anthropic.com`, `platform.claude.com`, `chatgpt.com` and `auth.openai.com` over HTTPS with certificate checks.
 - **Writes** refreshed tokens back to those files when they have expired.
 - **Runs** `agy -p /usage` every 5 minutes.
+- **macOS:** reads and writes the Claude Code login in the login Keychain through `/usr/bin/security`. The refreshed secret is passed as hex on stdin (`security -i`), never as a command-line argument, so it does not show in `ps`; the same unchanged-since-read check applies. Start at Login is a LaunchAgent plist in `~/Library/LaunchAgents/com.luckyphil.usagewidget.plist`. Because apps started from Finder get a minimal PATH, `/opt/homebrew/bin`, `/usr/local/bin` and `~/.local/bin` are appended (not prepended) to PATH to find `agy`; these folders are writable by the same user, as in Terminal. Notifications go through `osascript` with the text as arguments, not spliced into the script. `open` and `security` are run by full path.
 - **Stores** window position and reminders in `%APPDATA%\UsageWidget`, and adds a `Run` registry value for autostart. No tokens, response bodies or URLs with secrets are logged.
 
 The OAuth client IDs in the source are the public IDs of the official CLIs, not secrets. No secrets are in git history.
@@ -20,7 +21,7 @@ The OAuth client IDs in the source are the public IDs of the official CLIs, not 
 | 3 | Low | **Token forwarded on redirect.** `urllib` copies the `Authorization` header to any host a redirect points at. | Fixed: authenticated requests refuse redirects. |
 | 4 | Low | **Unpinned build dependencies.** Release exes pulled whatever `pystray`, `pillow` and `pyinstaller` were current. | Fixed: exact versions pinned. Bump them deliberately. |
 | 5 | Low | **Paid prompt risk.** If `agy` ever stops treating `/usage` as a command, each poll would be a billed prompt. | Mitigated: after one reply that isn't usage JSON, Antigravity polling stops until restart. |
-| 6 | Info | Release exes are unsigned, so users can't verify them. | Open: publish a SHA-256 next to each release (`Get-FileHash dist\UsageWidget.exe`). |
+| 6 | Info | Release exes are unsigned, so users can't verify them. | Open: publish a SHA-256 next to each release (`Get-FileHash dist\UsageWidget.exe`, `shasum -a 256 dist/UsageWidget-mac.zip`). The Mac app is ad hoc signed and not notarized. |
 | 7 | Info | `settings.json` `launch` values are opened with `os.startfile`. | Accepted: only the same Windows user can edit it, and they can already run anything. |
 | 8 | Info | First run enables autostart without asking. | Accepted: documented in the README, one click to undo in the tray. |
 | 9 | Info | Undocumented endpoints are called with the official CLIs' client IDs. | Accepted: noted in the README caveats; check provider terms. |

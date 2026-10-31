@@ -1,6 +1,6 @@
 # Usage Widget
 
-A small Windows desktop card and tray icon that answers "which AI subscription should I use right now?" for Claude Code, Codex and Antigravity.
+A small Windows desktop card and tray icon, and a macOS menu bar app, that answers "which AI subscription should I use right now?" for Claude Code, Codex and Antigravity.
 
 ## Install
 
@@ -34,9 +34,36 @@ Tray > Edit settings opens `%APPDATA%\UsageWidget\settings.json`:
 
 Changes apply on the next refresh. Position, reminders and an error log live in the same folder.
 
+## macOS
+
+Built for Apple Silicon (arm64). In Terminal, download the latest release and check its SHA-256 against the release notes:
+
+```sh
+curl -fL -o /tmp/UsageWidget-mac.zip https://github.com/LuckyPhilDev/usage-widget/releases/latest/download/UsageWidget-mac.zip
+shasum -a 256 /tmp/UsageWidget-mac.zip
+```
+
+Then install and start it (the same two steps update an existing copy):
+
+```sh
+pkill -x UsageWidget; rm -rf /Applications/UsageWidget.app && ditto -x -k /tmp/UsageWidget-mac.zip /Applications && open /Applications/UsageWidget.app
+```
+
+The app is not notarized. Files downloaded with `curl` skip the Gatekeeper prompt; if you download the zip in a browser instead, unzip it, move `UsageWidget.app` to Applications and open it, then go to System Settings > Privacy & Security and click Open Anyway.
+
+It lives in the menu bar (no Dock icon). The title is the suggestion, e.g. `Claude 57%`. Click it for the same rows as the Windows card, with the suggestion marked in blue. Hover a row for reset times and a submenu with Open and "Remind me when it refills". Start at Login is on after the first run (a LaunchAgent in `~/Library/LaunchAgents`); untick it in the menu.
+
+Where it reads logins:
+
+- Claude Code: the login Keychain item `Claude Code-credentials` (falls back to `~/.claude/.credentials.json`). If macOS asks to allow `security` access, choose Always Allow.
+- Codex: `~/.codex/auth.json`
+- Antigravity: `agy` on your PATH, or in `/opt/homebrew/bin`, `/usr/local/bin` or `~/.local/bin`
+
+Settings, state and the log live in `~/Library/Application Support/UsageWidget`; `launch` values are app names for `open -a` (Codex is `ChatGPT`).
+
 ## Caveats
 
-Usage comes from undocumented endpoints the official tools use (`api.anthropic.com/api/oauth/usage`, `chatgpt.com/backend-api/wham/usage`, `agy -p /usage`), so it can break without notice. When a Claude Code or Codex login has expired, the widget refreshes it and saves it back to that tool's credentials file, as the tool itself would (skipped if the tool changed the file meanwhile). See [SECURITY.md](SECURITY.md). Check the providers' terms before relying on it.
+Usage comes from undocumented endpoints the official tools use (`api.anthropic.com/api/oauth/usage`, `chatgpt.com/backend-api/wham/usage`, `agy -p /usage`), so it can break without notice. When a Claude Code or Codex login has expired, the widget refreshes it and saves it back to that tool's credentials file (the Keychain on macOS for Claude Code), as the tool itself would (skipped if the tool changed the file meanwhile). See [SECURITY.md](SECURITY.md). Check the providers' terms before relying on it.
 
 ## Development
 
@@ -45,4 +72,9 @@ python -m pip install -r requirements.txt
 python usage_widget.py --check   # logic self-check + one live fetch
 pythonw usage_widget.py          # run without a console
 .\build.ps1                      # builds dist\UsageWidget.exe
+```
+
+```sh
+python3 usage_core.py            # macOS: logic self-check + one live fetch
+./build.sh                       # builds dist/UsageWidget.app and UsageWidget-mac.zip
 ```
