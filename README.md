@@ -35,7 +35,7 @@ Changes apply on the next refresh. Position, reminders and an error log live in 
 
 ## Caveats
 
-Usage comes from undocumented endpoints the official tools use (`api.anthropic.com/api/oauth/usage`, `chatgpt.com/backend-api/wham/usage`, `agy -p /usage`), so it can break without notice. When a Claude Code or Codex login has expired, the widget refreshes it and saves it back to that tool's credentials file, as the tool itself would. Check the providers' terms before relying on it.
+Usage comes from undocumented endpoints the official tools use (`api.anthropic.com/api/oauth/usage`, `chatgpt.com/backend-api/wham/usage`, `agy -p /usage`), so it can break without notice. When a Claude Code or Codex login has expired, the widget refreshes it and saves it back to that tool's credentials file, as the tool itself would (skipped if the tool changed the file meanwhile). See [SECURITY.md](SECURITY.md). Check the providers' terms before relying on it.
 
 ## Development
 

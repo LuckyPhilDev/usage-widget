@@ -8,6 +8,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -20,8 +21,12 @@ from pathlib import Path
 import pystray
 from PIL import Image, ImageDraw
 
+# Launched from Downloads, Windows would otherwise run a planted agy.bat from the current folder.
+os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+
 APP_NAME = "UsageWidget"
 HOME = Path.home()
+NOTEPAD = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "notepad.exe"
 DATA_DIR = Path(os.environ.get("APPDATA", HOME)) / APP_NAME
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "widget.json"
@@ -77,12 +82,20 @@ logging.basicConfig(filename=DATA_DIR / "usage_widget.log", level=logging.WARNIN
 # Each fetcher returns subs: {"name", "h", "h_reset", "w", "w_reset"} where h/w are % left
 # of the 5h and weekly windows and resets are epoch seconds (None = window not started).
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None  # urllib would forward the Authorization header to whatever host it redirects to
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
 def http_json(url, headers=None, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, headers={
         "User-Agent": "usage-widget/1.0", "Accept": "application/json",
         **({"Content-Type": "application/json"} if data else {}), **(headers or {})})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with OPENER.open(req, timeout=30) as resp:
         return json.load(resp)
 
 
@@ -90,6 +103,12 @@ def write_json(path, obj):
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(obj, indent=2))
     tmp.replace(path)
+
+
+def write_back(path, original_text, obj):
+    """Save refreshed tokens unless the owning tool rewrote the file while we were refreshing."""
+    if path.read_text() == original_text:
+        write_json(path, obj)
 
 
 def jwt_exp(token):
@@ -106,7 +125,8 @@ def sub(name, h, h_reset, w, w_reset):
 
 
 def fetch_claude():
-    creds = json.loads(CLAUDE_CREDS.read_text())
+    raw = CLAUDE_CREDS.read_text()
+    creds = json.loads(raw)
     oauth = creds["claudeAiOauth"]
     if oauth["expiresAt"] / 1000 < time.time() + 60:
         new = http_json(CLAUDE_TOKEN_URL, body={
@@ -115,7 +135,7 @@ def fetch_claude():
         oauth["accessToken"] = new["access_token"]
         oauth["refreshToken"] = new.get("refresh_token", oauth["refreshToken"])
         oauth["expiresAt"] = int((time.time() + new["expires_in"]) * 1000)
-        write_json(CLAUDE_CREDS, creds)
+        write_back(CLAUDE_CREDS, raw, creds)
     data = http_json(CLAUDE_USAGE_URL, {
         "Authorization": f"Bearer {oauth['accessToken']}", "anthropic-beta": "oauth-2025-04-20"})
 
@@ -129,7 +149,8 @@ def fetch_claude():
 
 
 def fetch_codex():
-    auth = json.loads(CODEX_AUTH.read_text())
+    raw = CODEX_AUTH.read_text()
+    auth = json.loads(raw)
     tokens = auth["tokens"]
     if jwt_exp(tokens["access_token"]) < time.time() + 60:
         new = http_json(CODEX_TOKEN_URL, body={
@@ -139,7 +160,7 @@ def fetch_codex():
             if new.get(key):
                 tokens[key] = new[key]
         auth["last_refresh"] = datetime.utcnow().isoformat() + "Z"
-        write_json(CODEX_AUTH, auth)
+        write_back(CODEX_AUTH, raw, auth)
     data = http_json(CODEX_USAGE_URL, {
         "Authorization": f"Bearer {tokens['access_token']}", "ChatGPT-Account-Id": tokens["account_id"]})
     limits = data["rate_limit"]
@@ -148,14 +169,25 @@ def fetch_codex():
                 100 - week["used_percent"], week["reset_at"])]
 
 
+agy_trusted = True  # cleared when agy's reply isn't usage JSON: "/usage" may have run as a paid prompt
+
+
 def fetch_antigravity():
+    global agy_trusted
+    if not agy_trusted:
+        raise RuntimeError("skipped after unexpected agy output; restart to retry")
     # Argument list, no shell: a shell (Git Bash) can mangle "/usage" into a path, which agy sends as a paid prompt.
-    out = subprocess.run([shutil.which("agy") or "agy", "-p", "/usage", "--output-format", "json"],
+    out = subprocess.run([shutil.which("agy"), "-p", "/usage", "--output-format", "json"],
                          capture_output=True, text=True, timeout=120,
                          creationflags=subprocess.CREATE_NO_WINDOW, check=True).stdout
+    try:
+        groups = json.loads(out)["command"]["data"]["groups"]
+    except (ValueError, KeyError, TypeError):
+        agy_trusted = False
+        raise
     names = {"Gemini Models": "AG Gemini", "Claude and GPT models": "AG Claude/GPT", "Gemini 4 Argon": "Argon"}
     subs = []
-    for group in json.loads(out)["command"]["data"]["groups"]:
+    for group in groups:
         windows = {"5h": (None, None), "weekly": (None, None)}
         for b in group["buckets"]:
             pct = b["remaining_fraction"] * 100
@@ -405,7 +437,7 @@ class Widget:
             pystray.MenuItem("Show", lambda: self.events.put(("popup",)), default=True, visible=False),
             pystray.MenuItem("Refresh", lambda: self.events.put(("refresh",))),
             pystray.MenuItem("Start with Windows", self.toggle_autostart, checked=lambda item: starts_with_windows()),
-            pystray.MenuItem("Edit settings", lambda: subprocess.Popen(["notepad.exe", str(SETTINGS_FILE)])),
+            pystray.MenuItem("Edit settings", lambda: subprocess.Popen([NOTEPAD, SETTINGS_FILE])),
             pystray.MenuItem("Quit", lambda: self.events.put(("quit",)))),
             on_hover=lambda: self.events.put(("peek",)))
         self.tray.run_detached()
@@ -708,6 +740,15 @@ def self_check():
     assert runs_out_at([(now - 600, 80), (now, 70)]) == now + 70 * 60, "10%/10min, 70% left = 70 min"
     assert runs_out_at([(now - 600, 70), (now, 70)]) is None, "idle never runs out"
     assert runs_out_at([(now - 300, 80), (now, 70)]) is None, "too little history"
+
+    assert NoRedirect().redirect_request(None, None, 302, "Found", {}, "https://evil.example") is None, "no redirect"
+    with tempfile.TemporaryDirectory() as tmp:
+        creds = Path(tmp) / "creds.json"
+        creds.write_text("newer login")
+        write_back(creds, "stale", {"token": "ours"})
+        assert creds.read_text() == "newer login", "tool's newer file kept"
+        write_back(creds, "newer login", {"token": "ours"})
+        assert json.loads(creds.read_text()) == {"token": "ours"}, "unchanged file updated"
     print("self-check ok")
 
 
