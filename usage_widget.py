@@ -425,7 +425,6 @@ class Widget:
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.configure(bg=BG)
-        self.root.attributes("-alpha", 0.92)
         state = self.load_state()
         self.root.geometry(f"+{state.get('x', 40)}+{state.get('y', 40)}")
         self.reminders = set(state.get("reminders", []))  # sub names to notify about when they refill
