@@ -4,6 +4,10 @@ Desktop card + tray icon answering "which sub should I use right now?" for Claud
 
 Each row: big bar = 5h quota left, thin bar = time left in the 5h window, right = weekly pace (weekly % left minus % of the week left; positive = spare). Hover a row for reset times. The blue row is the suggestion: first of Claude, Codex, AG Claude/GPT, AG Gemini with 20%+ of its 5h left and not more than 10 points behind weekly pace, unless another sub has 50%+ left and resets within an hour. Tune via the constants at the top of the script.
 
+Notes at the right end of a bar: `back 18:45` = when a skipped sub becomes suggestible again if left idle; `out ~16:56` = at your last 30 min burn rate the 5h quota runs out before it resets.
+
+Click a row to open that tool (AppIDs in `LAUNCH`). Right-click a row for "Remind me when it refills": a bell shows on the row and a Windows notification fires once it's back to 99%+.
+
 - Run: `pythonw usage_widget.py` (needs `pip install pystray pillow`)
 - Check data sources: `python usage_widget.py --check`
 - Auto-start: `Usage Widget.lnk` in `shell:startup`. Delete it to stop auto-start.

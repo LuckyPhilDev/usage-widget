@@ -3,6 +3,7 @@ import base64
 import ctypes
 import json
 import logging
+import os
 import queue
 import shutil
 import subprocess
@@ -34,6 +35,14 @@ MIN_SESSION_LEFT = 20      # % of 5h window; below this a sub is not worth sugge
 MAX_BEHIND_PACE = -10      # weekly pace delta; further behind than this and the sub is skipped
 EXPIRY_OVERRIDE_LEFT = 50  # % of 5h left that jumps the queue when ...
 EXPIRY_OVERRIDE_SECS = 3600  # ... it resets within this long
+RUNWAY_LOOKBACK = 30 * 60   # burn rate is measured over this much recent history ...
+RUNWAY_MIN_SPAN = 9 * 60    # ... once at least this much exists
+REFILLED_AT = 99            # % of 5h left that counts as refilled for reminders
+CLICK_SLOP = 4              # px of movement before a press is a drag, not a click
+
+# Start menu AppIDs (PowerShell: Get-StartApps) opened by clicking a row.
+LAUNCH = {"Claude": "Claude_pzs8sxrjxfjjc!Claude", "Codex": "OpenAI.Codex_2p2nqsd0c76g0!App",
+          "AG Claude/GPT": "Google.Antigravity", "AG Gemini": "Google.Antigravity"}
 
 CLAUDE_CREDS = HOME / ".claude" / ".credentials.json"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
@@ -50,6 +59,8 @@ GREEN, AMBER, RED, ACCENT, TIME_BAR, NEUTRAL = "#4caf50", "#f0a030", "#e05050", 
 FONT = ("Segoe UI", 9)
 FONT_BOLD = ("Segoe UI", 9, "bold")
 FONT_SMALL = ("Segoe UI", 8)
+FONT_ICON = ("Segoe MDL2 Assets", 8)
+BELL = ""  # Segoe MDL2 "Ringer"
 BAR_W, BAR_H, TIME_H = 150, 14, 3
 
 logging.basicConfig(filename=HERE / "usage_widget.log", level=logging.WARNING,
@@ -167,9 +178,38 @@ def pace_delta(s, now):
     return round(s["w"] - time_left(s["w_reset"], WEEK_SECONDS, now))
 
 
+def is_usable(s, now):
+    return s["h"] >= MIN_SESSION_LEFT and pace_delta(s, now) > MAX_BEHIND_PACE
+
+
+def usable_again_at(s, now):
+    """When a sub that is too low becomes suggestible again if left idle; None if usable now."""
+    if is_usable(s, now):
+        return None
+    waits = []
+    if s["h"] < MIN_SESSION_LEFT:
+        waits.append(s["h_reset"] or now)
+    delta = pace_delta(s, now)
+    if delta <= MAX_BEHIND_PACE:
+        # Idle quota holds steady while the week runs down, closing the gap at 100% per week.
+        catch_up = now + (MAX_BEHIND_PACE + 1 - delta) / 100 * WEEK_SECONDS
+        waits.append(min(catch_up, s["w_reset"] or catch_up))
+    return max(waits)
+
+
+def runs_out_at(samples):
+    """Epoch when 5h quota hits 0 at the recent burn rate; samples are (time, % left), oldest first."""
+    if len(samples) < 2:
+        return None
+    t1, p1 = samples[-1]
+    t0, p0 = next((t, p) for t, p in samples if t1 - t <= RUNWAY_LOOKBACK)
+    if t1 - t0 < RUNWAY_MIN_SPAN or p0 <= p1:
+        return None
+    return t1 + p1 / ((p0 - p1) / (t1 - t0))
+
+
 def suggest(subs, now):
-    usable = [s for s in subs if s["h"] is not None and s["h"] >= MIN_SESSION_LEFT
-              and pace_delta(s, now) > MAX_BEHIND_PACE]
+    usable = [s for s in subs if s["h"] is not None and is_usable(s, now)]
     expiring = [s for s in usable if s["h_reset"] and s["h"] > EXPIRY_OVERRIDE_LEFT
                 and s["h_reset"] - now < EXPIRY_OVERRIDE_SECS]
     pool = expiring or usable
@@ -196,9 +236,11 @@ def countdown(reset):
     secs = max(0, int(reset - time.time()))
     d, h, m = secs // 86400, secs % 86400 // 3600, secs % 3600 // 60
     left = f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m"
-    at = datetime.fromtimestamp(reset)
-    clock = at.strftime("%H:%M") if secs < 86400 else at.strftime("%a %H:%M")
-    return f"{left} ({clock})"
+    return f"{left} ({clock(reset)})"
+
+
+def clock(ts):
+    return datetime.fromtimestamp(ts).strftime("%H:%M" if ts - time.time() < 86400 else "%a %H:%M")
 
 
 def ago(ts):
@@ -279,6 +321,7 @@ class Widget:
         self.root.attributes("-alpha", 0.92)
         state = self.load_state()
         self.root.geometry(f"+{state.get('x', 40)}+{state.get('y', 40)}")
+        self.reminders = set(state.get("reminders", []))  # sub names to notify about when they refill
         self.body = tk.Frame(self.root, bg=BG, padx=12, pady=10)
         self.body.pack()
         self.tooltip = Tooltip(self.root)
@@ -289,6 +332,8 @@ class Widget:
         self.popped = False
         self.peek_anchor = None  # cursor position while hover-peeking from the tray
         self.drag_from = None
+        self.press_at = None
+        self.samples = {}  # sub name -> [(time, 5h % left)] for burn rate
 
         self.root.bind_all("<ButtonPress-1>", self.drag_start)
         self.root.bind_all("<B1-Motion>", self.drag_move)
@@ -315,8 +360,9 @@ class Widget:
         except (OSError, ValueError):
             return {}
 
-    def save_position(self):
-        write_json(STATE_FILE, {"x": self.root.winfo_x(), "y": self.root.winfo_y()})
+    def save_state(self):
+        write_json(STATE_FILE, {"x": self.root.winfo_x(), "y": self.root.winfo_y(),
+                                "reminders": sorted(self.reminders)})
 
     # --- z-order ---
     def hwnd(self):
@@ -362,6 +408,7 @@ class Widget:
     # --- dragging ---
     def drag_start(self, e):
         self.tooltip.hide()
+        self.press_at = (e.x_root, e.y_root)
         self.drag_from = (e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y())
 
     def drag_move(self, e):
@@ -369,7 +416,7 @@ class Widget:
         self.root.geometry(f"+{e.x_root - dx}+{e.y_root - dy}")
 
     def drag_end(self, e):
-        self.save_position()
+        self.save_state()
         if not self.popped:
             self.to_bottom()
 
@@ -394,6 +441,8 @@ class Widget:
                 entry["error"] = error
                 if subs is not None:
                     entry["subs"], entry["ok_at"] = subs, time.time()
+                    self.record_samples(subs)
+                    self.check_reminders(subs)
                 self.render()
             elif kind == "popup":
                 self.pop_up()
@@ -444,16 +493,34 @@ class Widget:
         self.tray.title = f"Use {pick}" if pick else "AI usage: nothing suggested"
 
     def draw_row(self, r, s, stale, picked, now):
-        tk.Frame(self.body, bg=ACCENT if picked else BG, width=3, height=26).grid(row=r, column=0, padx=(0, 8), pady=3)
-        name = tk.Label(self.body, text=s["name"], font=FONT_BOLD, width=13, anchor="w", bg=BG,
-                        fg=DIM if stale else ACCENT if picked else FG)
-        name.grid(row=r, column=1, sticky="w")
+        stripe = tk.Frame(self.body, bg=ACCENT if picked else BG, width=3, height=26)
+        stripe.grid(row=r, column=0, padx=(0, 8), pady=3)
+        label = tk.Frame(self.body, bg=BG)
+        label.grid(row=r, column=1, sticky="w")
+        name = tk.Label(label, text=s["name"], font=FONT_BOLD, bg=BG, fg=DIM if stale else ACCENT if picked else FG)
+        name.pack(side="left")
+        reminded = s["name"] in self.reminders
+        bell = tk.Label(label, text=BELL if reminded else "", font=FONT_ICON, bg=BG, fg=ACCENT)
+        bell.pack(side="left", padx=(4, 0))
+        self.body.grid_columnconfigure(1, minsize=112)
+
+        back_at = usable_again_at(s, now)
+        out_at = runs_out_at(self.samples.get(s["name"], []))
+        running_out = back_at is None and out_at is not None and s["h_reset"] and out_at < s["h_reset"]
+        note = f"back {clock(back_at)}" if back_at else f"out ~{clock(out_at)}" if running_out else ""
 
         bar = tk.Canvas(self.body, width=BAR_W, height=BAR_H + 3 + TIME_H, bg=BG, highlightthickness=0)
+        fill_w = BAR_W * s["h"] / 100
         bar.create_rectangle(0, 0, BAR_W, BAR_H, fill=TRACK, width=0)
-        bar.create_rectangle(0, 0, BAR_W * s["h"] / 100, BAR_H, fill=DIM if stale else color_for(s["h"]), width=0)
+        bar.create_rectangle(0, 0, fill_w, BAR_H, fill=DIM if stale else color_for(s["h"]), width=0)
         bar.create_text(6, BAR_H / 2, text=f"{s['h']:.0f}%", anchor="w", font=FONT_SMALL,
                         fill=INK if s["h"] >= 20 else FG)
+        if note:
+            # Backed by a track-coloured chip so it reads the same over the fill or the empty track.
+            text = bar.create_text(BAR_W - 5, BAR_H / 2, text=note, anchor="e", font=FONT_SMALL,
+                                   fill=AMBER if running_out else NEUTRAL)
+            x0, _, x1, _ = bar.bbox(text)
+            bar.tag_lower(bar.create_rectangle(x0 - 4, 1, BAR_W - 1, BAR_H - 1, fill=TRACK, width=0), text)
         time_y = BAR_H + 3
         bar.create_rectangle(0, time_y, BAR_W, time_y + TIME_H, fill=TRACK, width=0)
         if s["h_reset"] is not None:
@@ -466,13 +533,75 @@ class Widget:
                         fg=DIM if stale else pace_color(delta))
         pace.grid(row=r, column=3, sticky="e")
 
-        weekly = "weekly not reported" if s["w"] is None else \
-            f"Weekly: {s['w']:.0f}% left, resets {countdown(s['w_reset'])}"
-        tip = f"5 hour: {s['h']:.0f}% left, resets {countdown(s['h_reset'])}\n{weekly}\n" \
-              f"Weekly pace: {delta:+d}% vs an even spend"
-        for widget in (name, bar, pace):
+        lines = [f"5 hour: {s['h']:.0f}% left, resets {countdown(s['h_reset'])}",
+                 "Weekly not reported" if s["w"] is None else
+                 f"Weekly: {s['w']:.0f}% left, resets {countdown(s['w_reset'])}",
+                 f"Weekly pace: {delta:+d}% vs an even spend"]
+        if back_at:
+            lines.append(f"Suggestible again at {clock(back_at)} if left idle")
+        if out_at:
+            lines.append(f"At your recent pace, 5 hour runs out ~{clock(out_at)}")
+        if reminded:
+            lines.append("Refill reminder set")
+        lines.append("Click to open, right-click for a refill reminder")
+        tip = "\n".join(lines)
+
+        for widget in (stripe, label, name, bell, bar, pace):
+            widget.configure(cursor="hand2")
             widget.bind("<Enter>", lambda e, t=tip: self.tooltip.show(t, e.x_root, e.y_root))
             widget.bind("<Leave>", lambda e: self.tooltip.hide())
+            widget.bind("<ButtonRelease-1>", lambda e, n=s["name"]: self.click_row(e, n))
+            widget.bind("<Button-3>", lambda e, sub=s: self.row_menu(e, sub))
+
+    # --- row actions ---
+    def click_row(self, e, name):
+        px, py = self.press_at or (e.x_root, e.y_root)
+        if abs(e.x_root - px) <= CLICK_SLOP and abs(e.y_root - py) <= CLICK_SLOP:
+            self.open_tool(name)
+
+    @staticmethod
+    def open_tool(name):
+        if name in LAUNCH:
+            os.startfile(f"shell:AppsFolder\\{LAUNCH[name]}")
+
+    def row_menu(self, e, s):
+        self.tooltip.hide()
+        menu = tk.Menu(self.root, tearoff=False)
+        if s["name"] in self.reminders:
+            menu.add_command(label="Cancel refill reminder", command=lambda: self.set_reminder(s, False))
+        elif s["h"] < REFILLED_AT:
+            menu.add_command(label=f"Remind me when it refills ({clock(s['h_reset'])})" if s["h_reset"]
+                             else "Remind me when it refills", command=lambda: self.set_reminder(s, True))
+        if s["name"] in LAUNCH:
+            menu.add_command(label="Open", command=lambda: self.open_tool(s["name"]))
+        menu.tk_popup(e.x_root, e.y_root)
+
+    def set_reminder(self, s, on):
+        (self.reminders.add if on else self.reminders.discard)(s["name"])
+        if on and s["h_reset"]:
+            # Fetch right after the reset rather than waiting for the next 5 minute refresh.
+            self.root.after(int(max(0, s["h_reset"] - time.time() + 30) * 1000), self.refresh)
+        self.save_state()
+        self.render()
+
+    def check_reminders(self, subs):
+        refilled = [s for s in subs if s["name"] in self.reminders and s["h"] is not None and s["h"] >= REFILLED_AT]
+        for s in refilled:
+            self.reminders.discard(s["name"])
+            self.tray.notify(f"{s['name']} is back to {s['h']:.0f}% of its 5 hour limit.", f"{s['name']} refilled")
+        if refilled:
+            self.save_state()
+
+    def record_samples(self, subs):
+        now = time.time()
+        for s in subs:
+            if s["h"] is None:
+                continue
+            history = self.samples.setdefault(s["name"], [])
+            if history and s["h"] > history[-1][1] + 1:  # window reset; old burn rate no longer applies
+                history.clear()
+            history.append((now, s["h"]))
+            del history[:-(RUNWAY_LOOKBACK // (REFRESH_SECONDS // 2))]
 
     @staticmethod
     def tray_image(has_pick):
@@ -498,6 +627,16 @@ def self_check():
     assert suggest([s("Claude", 91, 4 * 3600), s("AG Gemini", 70, 1800)], now) == "AG Gemini", "expiry override"
     assert suggest([s("Claude", 5, 3600)], now) is None, "nothing usable"
     assert pace_delta(sub("x", 1, None, 100, None), now) == 0, "unstarted week is on pace"
+
+    assert usable_again_at(s("Claude", 91, 3600), now) is None, "usable now"
+    assert usable_again_at(s("Codex", 10, 3600), now) == now + 3600, "low session back at reset"
+    behind = usable_again_at(s("Codex", 80, 3600, w=35), now)  # pace -15: needs 6 points of the week to pass
+    assert abs(behind - (now + 0.06 * WEEK_SECONDS)) < 1, behind
+
+    assert runs_out_at([(now, 80)]) is None, "one sample has no rate"
+    assert runs_out_at([(now - 600, 80), (now, 70)]) == now + 70 * 60, "10%/10min, 70% left = 70 min"
+    assert runs_out_at([(now - 600, 70), (now, 70)]) is None, "idle never runs out"
+    assert runs_out_at([(now - 300, 80), (now, 70)]) is None, "too little history"
     print("self-check ok")
 
 
