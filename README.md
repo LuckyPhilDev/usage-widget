@@ -51,7 +51,7 @@ pkill -x UsageWidget; rm -rf /Applications/UsageWidget.app && ditto -x -k /tmp/U
 
 The app is not notarized. Files downloaded with `curl` skip the Gatekeeper prompt; if you download the zip in a browser instead, unzip it, move `UsageWidget.app` to Applications and open it, then go to System Settings > Privacy & Security and click Open Anyway.
 
-It lives in the menu bar (no Dock icon). The title is the suggestion, e.g. `Claude 57%`. Each row shows a 5 hour bar and %, time left in the 5 hour window and weekly pace; the suggestion has a checkmark. Hover a row for details, Open and "Remind me when it refills". Start at Login is on after the first run (a LaunchAgent in `~/Library/LaunchAgents`); untick it in the menu.
+It lives in the menu bar (no Dock icon). The title is the suggestion, e.g. `Claude 57%`. Click it for the same rows as the Windows card, with the suggestion marked in blue. Hover a row for reset times and a submenu with Open and "Remind me when it refills". Start at Login is on after the first run (a LaunchAgent in `~/Library/LaunchAgents`); untick it in the menu.
 
 Where it reads logins:
 

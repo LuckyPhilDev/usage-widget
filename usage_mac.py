@@ -10,20 +10,22 @@ import time
 from pathlib import Path
 
 import rumps
-from AppKit import NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName
+from AppKit import (NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBezierPath, NSColor, NSFont,
+                    NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSMakeRect, NSMakeSize)
 from Foundation import NSAttributedString
 
 import usage_core as core
-from usage_core import (APP_NAME, DATA_DIR, REFILLED_AT, REFRESH_SECONDS, SETTINGS_FILE, STATE_FILE, ago, check,
-                        clock, countdown, duration, installed_providers, load_settings, load_state, pace_delta, rank,
-                        record_sample, runs_out_at, save_setting, suggest, usable_again_at, write_json)
+from usage_core import (APP_NAME, DATA_DIR, REFILLED_AT, REFRESH_SECONDS, SESSION_SECONDS, SETTINGS_FILE, STATE_FILE, ago, check,
+                        clock, countdown, installed_providers, load_settings, load_state, pace_delta, rank,
+                        record_sample, runs_out_at, save_setting, suggest, time_left, usable_again_at, write_json)
 
 LABEL = "com.luckyphil.usagewidget"
 LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 OPEN = "/usr/bin/open"
 REDRAW_SECONDS = 30
-BAR_CELLS = 10
-MONO = NSFont.monospacedSystemFontOfSize_weight_(13, 0)
+# Same palette and bar geometry as the Windows card.
+GREEN, AMBER, RED, ACCENT, TIME_BAR, INK = "#4caf50", "#f0a030", "#e05050", "#4a9eff", "#9aa3b2", "#101114"
+NAME_W, BAR_W, BAR_H, TIME_H, PACE_W, ROW_H = 112, 150, 14, 3, 44, 26
 
 
 # ---------- startup ----------
@@ -65,14 +67,69 @@ def notify(title, text):
                       "-e", "end run", title, text])
 
 
-def item(title, callback=None, stale=False):
-    """Menu item in a monospaced font so the bars and numbers line up."""
-    menu_item = rumps.MenuItem(title, callback=callback)
-    attrs = {NSFontAttributeName: MONO}
-    if stale:
-        attrs[NSForegroundColorAttributeName] = NSColor.secondaryLabelColor()
-    menu_item._menuitem.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(title, attrs))
-    return menu_item
+def color(hex_rgb):
+    r, g, b = (int(hex_rgb[k:k + 2], 16) / 255 for k in (1, 3, 5))
+    return NSColor.colorWithSRGBRed_green_blue_alpha_(r, g, b, 1)
+
+
+def color_for(pct):
+    return GREEN if pct > 50 else AMBER if pct > 20 else RED
+
+
+def pace_color(delta):
+    return GREEN if delta >= 5 else RED if delta <= -10 else AMBER if delta <= -3 else None
+
+
+def fill(x, y, w, h, fill_color):
+    fill_color.setFill()
+    NSBezierPath.fillRect_(NSMakeRect(x, y, w, h))
+
+
+def text(s, x, mid, size, text_color, bold=False, right=False):
+    """Draw s vertically centred on mid, starting at x (or ending at x if right); returns its width."""
+    font = NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
+    string = NSAttributedString.alloc().initWithString_attributes_(
+        s, {NSFontAttributeName: font, NSForegroundColorAttributeName: text_color})
+    w, h = string.size()
+    string.drawAtPoint_((x - w if right else x, mid - h / 2))
+    return w
+
+
+def row_image(s, stale, picked, reminded, note, warn, delta, now):
+    """One card row (name, 5h bar with time-left bar under it, pace) as an image for a menu item."""
+    def draw(_):
+        # Drawn on each display, so light/dark mode is resolved here, not when the image is made.
+        dark = NSAppearance.currentDrawingAppearance().bestMatchFromAppearancesWithNames_(
+            [NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) == NSAppearanceNameDarkAqua
+        label, dim = NSColor.labelColor(), NSColor.secondaryLabelColor()
+        track = color("#33363d" if dark else "#dcdde1")
+        mid = ROW_H / 2
+        if picked:
+            fill(0, 4, 3, ROW_H - 8, color(ACCENT))
+        w = text(s["name"], 11, mid, 13, dim if stale else color(ACCENT) if picked else label, bold=True)
+        if reminded:
+            text("\U0001F514", 11 + w + 4, mid, 10, label)
+        x, top = 11 + NAME_W, (ROW_H - BAR_H - 3 - TIME_H) / 2
+        fill(x, top, BAR_W, BAR_H, track)
+        fill(x, top, BAR_W * s["h"] / 100, BAR_H, dim if stale else color(color_for(s["h"])))
+        on_fill = track if stale else color(INK)
+        text(f"{s['h']:.0f}%", x + 6, top + BAR_H / 2, 10, on_fill if s["h"] >= 20 else label)
+        if note:
+            # Backed by a track-coloured chip so it reads the same over the fill or the empty track.
+            note_w = NSAttributedString.alloc().initWithString_attributes_(
+                note, {NSFontAttributeName: NSFont.systemFontOfSize_(10)}).size()[0]
+            fill(x + BAR_W - 9 - note_w, top + 1, note_w + 8, BAR_H - 2, track)
+            text(note, x + BAR_W - 5, top + BAR_H / 2, 10, color(AMBER) if warn else dim, right=True)
+        time_y = top + BAR_H + 3
+        fill(x, time_y, BAR_W, TIME_H, track)
+        if s["h_reset"] is not None:
+            fill(x, time_y, BAR_W * time_left(s["h_reset"], SESSION_SECONDS, now) / 100, TIME_H, color(TIME_BAR))
+        pace = pace_color(delta)
+        text(f"{delta:+d}%", x + BAR_W + 8 + PACE_W, mid, 13, dim if stale else color(pace) if pace else label,
+             right=True)
+        return True
+    return NSImage.imageWithSize_flipped_drawingHandler_(
+        NSMakeSize(11 + NAME_W + BAR_W + 8 + PACE_W, ROW_H), True, draw)
 
 
 # ---------- app ----------
@@ -148,7 +205,7 @@ class App(rumps.App):
         if footnotes:
             menu.append(None)
         for note, stale in footnotes:
-            menu.append(item(note if isinstance(note, str) else f"{note['name']} weekly {note['w']:.0f}%"))
+            menu.append(rumps.MenuItem(note if isinstance(note, str) else f"{note['name']} weekly {note['w']:.0f}%"))
         menu += [None, rumps.MenuItem("Refresh", callback=lambda _: self.refresh()),
                  self.toggle("Show refill times", "show_back_times", core.SHOW_BACK_TIMES),
                  self.toggle("Show run-out warnings", "show_runway", core.SHOW_RUNWAY),
@@ -157,6 +214,8 @@ class App(rumps.App):
                  rumps.MenuItem("Quit", callback=lambda _: rumps.quit_application())]
         self.menu.clear()
         self.menu.update(menu)
+        for menu_item in menu[:len(rows)]:
+            menu_item._menuitem.setTitle_("")  # the image is the whole row; the title was only rumps' key
         picked = next((s for s, stale in rows if s["name"] == pick), None)
         self.title = f"{pick} {picked['h']:.0f}%" if picked else "AI usage"
 
@@ -179,14 +238,7 @@ class App(rumps.App):
         note = (f"back {clock(back_at)}" if back_at and core.SHOW_BACK_TIMES
                 else f"out ~{clock(out_at)}" if running_out and core.SHOW_RUNWAY else "")
         reminded = s["name"] in self.reminders
-        filled = round(s["h"] / 100 * BAR_CELLS)
-        bar = "█" * filled + "░" * (BAR_CELLS - filled)
-        left = duration(s["h_reset"] - now) if s["h_reset"] else "-"
         delta = pace_delta(s, now)
-        title = f"{s['name']:<14}{bar} {s['h']:3.0f}%  {left:>7}  {delta:+4d}%  {note}{' 🔔' if reminded else ''}"
-        row = item(title.rstrip(), stale=stale)
-        row.state = int(picked)
-
         details = [f"5 hour: {s['h']:.0f}% left, resets {countdown(s['h_reset'])}",
                    "Weekly not reported" if s["w"] is None else
                    f"Weekly: {s['w']:.0f}% left, resets {countdown(s['w_reset'])}",
@@ -195,6 +247,11 @@ class App(rumps.App):
             details.append(f"Suggestible again at {clock(back_at)} if left idle")
         if out_at:
             details.append(f"At your recent pace, 5 hour runs out ~{clock(out_at)}")
+        row = rumps.MenuItem(s["name"])
+        image = row_image(s, stale, picked, reminded, note, running_out, delta, now)
+        image.setAccessibilityDescription_(f"{s['name']}: {s['h']:.0f}% of 5 hour left, pace {delta:+d}%")
+        row._menuitem.setImage_(image)
+        row._menuitem.setToolTip_("\n".join(details))
         for line in details:
             row.add(rumps.MenuItem(line))
         row.add(rumps.separator)
