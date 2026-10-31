@@ -18,7 +18,7 @@ Each row: big bar = 5 hour quota left, thin bar = time left in the 5 hour window
 
 The blue row is the suggestion: the first sub in your favourite order with 20%+ of its 5 hour quota left and not more than 10 points behind weekly pace, unless another sub has 50%+ left and resets within an hour.
 
-Notes on a bar: `back 18:45` = when a skipped sub becomes suggestible again if left idle; `out ~16:56` = at your last 30 minutes of use, the 5 hour quota runs out before it resets.
+Optional notes on a bar (off by default; tray menu "Show refill times" and "Show run-out warnings"): `back 18:45` = when a skipped sub becomes suggestible again if left idle; `out ~16:56` = at your last 30 minutes of use, the 5 hour quota runs out before it resets.
 
 - Click a row to open that tool. Right-click for "Remind me when it refills" (a Windows notification once it's back to 99%+).
 - Tray: hover to peek at the card, left-click to bring it to the front, right-click for Refresh, Start with Windows, Edit settings, Quit.
@@ -30,6 +30,7 @@ Tray > Edit settings opens `%APPDATA%\UsageWidget\settings.json`:
 
 - `order`: favourite order for the suggestion (`Claude`, `Codex`, `AG Claude/GPT`, `AG Gemini`)
 - `launch`: Start menu AppID opened when you click a row (find them with PowerShell `Get-StartApps`)
+- `show_back_times`, `show_runway`: the optional bar notes (same as the tray menu ticks)
 
 Changes apply on the next refresh. Position, reminders and an error log live in the same folder.
 

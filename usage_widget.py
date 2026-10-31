@@ -55,6 +55,10 @@ CLICK_SLOP = 4              # px of movement before a press is a drag, not a cli
 LAUNCH = {"Claude": "Claude_pzs8sxrjxfjjc!Claude", "Codex": "OpenAI.Codex_2p2nqsd0c76g0!App",
           "AG Claude/GPT": "Google.Antigravity", "AG Gemini": "Google.Antigravity"}
 
+# Optional notes at the right end of each bar; off by default, toggled from the tray menu.
+SHOW_BACK_TIMES = False  # "back 18:45": when a skipped sub becomes suggestible again
+SHOW_RUNWAY = False      # "out ~19:26": 5h quota runs out before its reset at the recent pace
+
 CLAUDE_CREDS = HOME / ".claude" / ".credentials.json"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -211,14 +215,26 @@ def installed_providers():
 # ---------- settings and startup ----------
 
 def load_settings():
-    """User-editable favourite order and launch targets; written with defaults on first run."""
-    global ORDER, LAUNCH
+    """User-editable settings; written with defaults on first run."""
+    global ORDER, LAUNCH, SHOW_BACK_TIMES, SHOW_RUNWAY
     if not SETTINGS_FILE.exists():
-        write_json(SETTINGS_FILE, {"order": ORDER, "launch": LAUNCH})
+        write_json(SETTINGS_FILE, {"order": ORDER, "launch": LAUNCH,
+                                   "show_back_times": SHOW_BACK_TIMES, "show_runway": SHOW_RUNWAY})
     try:
         settings = json.loads(SETTINGS_FILE.read_text())
         ORDER, LAUNCH = settings.get("order", ORDER), settings.get("launch", LAUNCH)
+        SHOW_BACK_TIMES = bool(settings.get("show_back_times", False))
+        SHOW_RUNWAY = bool(settings.get("show_runway", False))
     except (OSError, ValueError) as exc:  # keep the previous settings until the file is fixed
+        logging.warning("settings.json: %s", exc)
+
+
+def save_setting(key, value):
+    try:
+        settings = json.loads(SETTINGS_FILE.read_text())
+        settings[key] = value
+        write_json(SETTINGS_FILE, settings)
+    except (OSError, ValueError) as exc:  # a broken file is left for the user to fix via Edit settings
         logging.warning("settings.json: %s", exc)
 
 
@@ -436,6 +452,10 @@ class Widget:
         self.tray = TrayIcon("usage_widget", self.tray_image(False), "AI usage", menu=pystray.Menu(
             pystray.MenuItem("Show", lambda: self.events.put(("popup",)), default=True, visible=False),
             pystray.MenuItem("Refresh", lambda: self.events.put(("refresh",))),
+            pystray.MenuItem("Show refill times", self.toggle_setting("show_back_times"),
+                             checked=lambda item: SHOW_BACK_TIMES),
+            pystray.MenuItem("Show run-out warnings", self.toggle_setting("show_runway"),
+                             checked=lambda item: SHOW_RUNWAY),
             pystray.MenuItem("Start with Windows", self.toggle_autostart, checked=lambda item: starts_with_windows()),
             pystray.MenuItem("Edit settings", lambda: subprocess.Popen([NOTEPAD, SETTINGS_FILE])),
             pystray.MenuItem("Quit", lambda: self.events.put(("quit",)))),
@@ -521,6 +541,14 @@ class Widget:
         set_start_with_windows(not starts_with_windows())
         icon.update_menu()
 
+    def toggle_setting(self, key):
+        def toggle(icon, item):
+            save_setting(key, not item.checked)
+            load_settings()
+            icon.update_menu()
+            self.events.put(("redraw",))
+        return toggle
+
     def refresh(self):
         load_settings()  # pick up edits to settings.json without a restart
         for name, fetch in self.providers.items():
@@ -549,6 +577,8 @@ class Widget:
                 self.pop_up()
             elif kind == "peek":
                 self.peek()
+            elif kind == "redraw":
+                self.render()
             elif kind == "refresh":
                 self.refresh()
             elif kind == "quit":
@@ -610,7 +640,8 @@ class Widget:
         back_at = usable_again_at(s, now)
         out_at = runs_out_at(self.samples.get(s["name"], []))
         running_out = back_at is None and out_at is not None and s["h_reset"] and out_at < s["h_reset"]
-        note = f"back {clock(back_at)}" if back_at else f"out ~{clock(out_at)}" if running_out else ""
+        note = (f"back {clock(back_at)}" if back_at and SHOW_BACK_TIMES
+                else f"out ~{clock(out_at)}" if running_out and SHOW_RUNWAY else "")
 
         bar = tk.Canvas(self.body, width=BAR_W, height=BAR_H + 3 + TIME_H, bg=BG, highlightthickness=0)
         fill_w = BAR_W * s["h"] / 100
