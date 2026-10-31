@@ -1,0 +1,5 @@
+__pycache__/
+widget.json
+usage_widget.log
+*.tmp
+preview.png
