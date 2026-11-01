@@ -337,7 +337,9 @@ class Widget:
                 row=r, column=0, columnspan=4, sticky="w", pady=(4 if r == len(rows) else 0, 0))
 
         self.tray.icon = self.tray_image(pick is not None)
-        self.tray.title = f"Use {pick}" if pick else "AI usage: nothing suggested"
+        plans = {s["name"]: s["plan"] for s, _ in rows if s.get("plan")}
+        pick_label = f"{pick} {plans[pick]}" if pick in plans else pick
+        self.tray.title = f"Use {pick_label}" if pick else "AI usage: nothing suggested"
 
     def draw_row(self, r, s, stale, picked, now):
         stripe = tk.Frame(self.body, bg=ACCENT if picked else BG, width=3, height=26)

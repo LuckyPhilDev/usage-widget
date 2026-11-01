@@ -134,8 +134,8 @@ def iso_to_epoch(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
 
 
-def sub(name, h, h_reset, w, w_reset):
-    return {"name": name, "h": h, "h_reset": h_reset, "w": w, "w_reset": w_reset}
+def sub(name, h, h_reset, w, w_reset, plan=None):
+    return {"name": name, "h": h, "h_reset": h_reset, "w": w, "w_reset": w_reset, "plan": plan}
 
 
 def claude_in_keychain():
@@ -168,7 +168,7 @@ def fetch_claude():
     # Opus/Sonnet weekly caps only matter when they are tighter than the overall weekly one.
     weeklies = [window(data[k]) for k in ("seven_day", "seven_day_opus", "seven_day_sonnet") if data.get(k)]
     weekly = min(weeklies, key=lambda pct_reset: pct_reset[0])
-    return [sub("Claude", *window(data["five_hour"]), *weekly)]
+    return [sub("Claude", *window(data["five_hour"]), *weekly, plan=(oauth.get("subscriptionType") or "").title() or None)]
 
 
 def fetch_codex():
@@ -189,7 +189,7 @@ def fetch_codex():
     limits = data["rate_limit"]
     session, week = limits["primary_window"], limits["secondary_window"]
     return [sub("Codex", 100 - session["used_percent"], session["reset_at"],
-                100 - week["used_percent"], week["reset_at"])]
+                100 - week["used_percent"], week["reset_at"], plan=(data.get("plan_type") or "").title() or None)]
 
 
 agy_trusted = True  # cleared when agy's reply isn't usage JSON: "/usage" may have run as a paid prompt
@@ -425,7 +425,7 @@ def check():
             print(f"{name:12} FAILED {type(exc).__name__}: {exc}")
     for s in sorted(subs, key=lambda s: rank(s["name"])):
         h = "    -" if s["h"] is None else f"{s['h']:5.1f}%"
-        print(f"{s['name']:14} 5h {h} {countdown(s['h_reset']):>20}  pace {pace_delta(s, now):+d}%")
+        print(f"{s['name']:14} 5h {h} {countdown(s['h_reset']):>20}  pace {pace_delta(s, now):+d}%  plan {s['plan'] or '-'}")
     print("suggest:", suggest([s for s in subs if s["h"] is not None], now))
 
 
