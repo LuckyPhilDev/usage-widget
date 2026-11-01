@@ -193,14 +193,34 @@ def fetch_codex():
 
 
 agy_trusted = True  # cleared when agy's reply isn't usage JSON: "/usage" may have run as a paid prompt
+AGY_LAST_CHECK = HOME / ".gemini" / "antigravity-cli" / "last_check.timestamp"
+
+
+def run_agy_update_check_hidden(agy):
+    # On Windows agy starts its hourly updater in a new, visible console window (CREATE_NO_WINDOW doesn't
+    # reach it), so do that check here, hidden, and mark it done before agy looks.
+    # agy rechecks once the timestamp is 15 minutes old; going at 10 keeps us ahead with a 5-minute poll.
+    # Relies on agy's undocumented timestamp file and interval; popups return if either changes.
+    try:
+        if time.time() - AGY_LAST_CHECK.stat().st_mtime < 10 * 60:
+            return
+    except FileNotFoundError:
+        pass
+    AGY_LAST_CHECK.touch()
+    subprocess.Popen([agy, "--bg-updater", "--app_data_dir=antigravity-cli", "--gemini_dir=.gemini"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def fetch_antigravity():
     global agy_trusted
     if not agy_trusted:
         raise RuntimeError("skipped after unexpected agy output; restart to retry")
+    agy = shutil.which("agy")
+    if not MAC:
+        run_agy_update_check_hidden(agy)
     # Argument list, no shell: a shell (Git Bash) can mangle "/usage" into a path, which agy sends as a paid prompt.
-    out = subprocess.run([shutil.which("agy"), "-p", "/usage", "--output-format", "json"],
+    out = subprocess.run([agy, "-p", "/usage", "--output-format", "json"],
                          capture_output=True, text=True, timeout=120,
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=True).stdout
     try:
