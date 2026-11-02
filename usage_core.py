@@ -134,8 +134,8 @@ def iso_to_epoch(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
 
 
-def sub(name, h, h_reset, w, w_reset):
-    return {"name": name, "h": h, "h_reset": h_reset, "w": w, "w_reset": w_reset}
+def sub(name, h, h_reset, w, w_reset, plan=None):
+    return {"name": name, "h": h, "h_reset": h_reset, "w": w, "w_reset": w_reset, "plan": plan}
 
 
 def claude_in_keychain():
@@ -168,7 +168,7 @@ def fetch_claude():
     # Opus/Sonnet weekly caps only matter when they are tighter than the overall weekly one.
     weeklies = [window(data[k]) for k in ("seven_day", "seven_day_opus", "seven_day_sonnet") if data.get(k)]
     weekly = min(weeklies, key=lambda pct_reset: pct_reset[0])
-    return [sub("Claude", *window(data["five_hour"]), *weekly)]
+    return [sub("Claude", *window(data["five_hour"]), *weekly, plan=(oauth.get("subscriptionType") or "").title() or None)]
 
 
 def fetch_codex():
@@ -189,18 +189,38 @@ def fetch_codex():
     limits = data["rate_limit"]
     session, week = limits["primary_window"], limits["secondary_window"]
     return [sub("Codex", 100 - session["used_percent"], session["reset_at"],
-                100 - week["used_percent"], week["reset_at"])]
+                100 - week["used_percent"], week["reset_at"], plan=(data.get("plan_type") or "").title() or None)]
 
 
 agy_trusted = True  # cleared when agy's reply isn't usage JSON: "/usage" may have run as a paid prompt
+AGY_LAST_CHECK = HOME / ".gemini" / "antigravity-cli" / "last_check.timestamp"
+
+
+def run_agy_update_check_hidden(agy):
+    # On Windows agy starts its hourly updater in a new, visible console window (CREATE_NO_WINDOW doesn't
+    # reach it), so do that check here, hidden, and mark it done before agy looks.
+    # agy rechecks once the timestamp is 15 minutes old; going at 10 keeps us ahead with a 5-minute poll.
+    # Relies on agy's undocumented timestamp file and interval; popups return if either changes.
+    try:
+        if time.time() - AGY_LAST_CHECK.stat().st_mtime < 10 * 60:
+            return
+    except FileNotFoundError:
+        pass
+    AGY_LAST_CHECK.touch()
+    subprocess.Popen([agy, "--bg-updater", "--app_data_dir=antigravity-cli", "--gemini_dir=.gemini"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def fetch_antigravity():
     global agy_trusted
     if not agy_trusted:
         raise RuntimeError("skipped after unexpected agy output; restart to retry")
+    agy = shutil.which("agy")
+    if not MAC:
+        run_agy_update_check_hidden(agy)
     # Argument list, no shell: a shell (Git Bash) can mangle "/usage" into a path, which agy sends as a paid prompt.
-    out = subprocess.run([shutil.which("agy"), "-p", "/usage", "--output-format", "json"],
+    out = subprocess.run([agy, "-p", "/usage", "--output-format", "json"],
                          capture_output=True, text=True, timeout=120,
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=True).stdout
     try:
@@ -405,7 +425,7 @@ def check():
             print(f"{name:12} FAILED {type(exc).__name__}: {exc}")
     for s in sorted(subs, key=lambda s: rank(s["name"])):
         h = "    -" if s["h"] is None else f"{s['h']:5.1f}%"
-        print(f"{s['name']:14} 5h {h} {countdown(s['h_reset']):>20}  pace {pace_delta(s, now):+d}%")
+        print(f"{s['name']:14} 5h {h} {countdown(s['h_reset']):>20}  pace {pace_delta(s, now):+d}%  plan {s['plan'] or '-'}")
     print("suggest:", suggest([s for s in subs if s["h"] is not None], now))
 
 
