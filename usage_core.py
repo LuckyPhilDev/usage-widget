@@ -28,6 +28,7 @@ else:
     os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "widget.json"
+USAGE_FILE = DATA_DIR / "usage.json"  # latest fetched values, read by other local tools
 SETTINGS_FILE = DATA_DIR / "settings.json"
 REFRESH_SECONDS = 300
 SESSION_SECONDS = 5 * 3600

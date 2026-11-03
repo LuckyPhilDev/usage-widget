@@ -284,6 +284,7 @@ class Widget:
                 entry["error"] = error
                 if subs is not None:
                     entry["subs"], entry["ok_at"] = subs, time.time()
+                    write_json(core.USAGE_FILE, self.data)
                     self.record_samples(subs)
                     self.check_reminders(subs)
                 self.render()
